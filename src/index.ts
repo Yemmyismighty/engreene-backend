@@ -11,6 +11,7 @@ import { errorHandler } from './middleware/errorHandler';
 import { notFoundHandler } from './middleware/notFoundHandler';
 import { automationService } from './services/automationService';
 import { SocketService } from './services/socketService';
+import { redisService } from './services/redisService';
 import authRoutes from './routes/auth';
 import walletRoutes from './routes/wallets';
 import cartRoutes from './routes/cart';
@@ -46,12 +47,27 @@ app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 
 // Health check endpoint
-app.get('/health', (_req, res) => {
-  res.status(200).json({
-    status: 'OK',
-    timestamp: new Date().toISOString(),
-    environment: config.environment,
-  });
+app.get('/health', async (_req, res) => {
+  try {
+    const redisHealth = await redisService.healthCheck();
+    const isHealthy = redisHealth.redis && redisHealth.session && redisHealth.cache;
+    
+    res.status(isHealthy ? 200 : 503).json({
+      status: isHealthy ? 'OK' : 'DEGRADED',
+      timestamp: new Date().toISOString(),
+      environment: config.environment,
+      services: {
+        redis: redisHealth,
+      },
+    });
+  } catch (error) {
+    res.status(503).json({
+      status: 'ERROR',
+      timestamp: new Date().toISOString(),
+      environment: config.environment,
+      error: 'Health check failed',
+    });
+  }
 });
 
 // API routes
@@ -90,10 +106,14 @@ const socketService = new SocketService(io);
 // Initialize automation services
 async function initializeServices() {
   try {
+    // Initialize Redis service first (other services may depend on it)
+    await redisService.initialize();
+    console.log('✅ Redis service initialized');
+    
     await automationService.initialize();
     console.log('✅ Automation services initialized');
   } catch (error) {
-    console.error('❌ Failed to initialize automation services:', error);
+    console.error('❌ Failed to initialize services:', error);
   }
 }
 
@@ -102,6 +122,7 @@ process.on('SIGTERM', async () => {
   console.log('SIGTERM received, shutting down gracefully');
   socketService.shutdown();
   await automationService.shutdown();
+  await redisService.shutdown();
   server.close(() => {
     console.log('Server closed');
     process.exit(0);
@@ -112,6 +133,7 @@ process.on('SIGINT', async () => {
   console.log('SIGINT received, shutting down gracefully');
   socketService.shutdown();
   await automationService.shutdown();
+  await redisService.shutdown();
   server.close(() => {
     console.log('Server closed');
     process.exit(0);
